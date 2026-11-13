@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Đồng hồ điện</title>
+<style>
+  :root{--bg:#f3f5f7;--card:#fff;--text:#1b2430;--muted:#6b7785;--accent:#0b6e4f;--warn:#c0392b;--line:#dde2e8}
+  @media (prefers-color-scheme:dark){:root{--bg:#10151b;--card:#1a212a;--text:#e8edf2;--muted:#8d99a6;--accent:#3ecf8e;--warn:#ff7b6b;--line:#2a333e}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;justify-content:center;padding:24px 16px}
+  main{width:100%;max-width:460px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{font-size:14px;color:var(--muted);margin:0 0 16px}
+  .sub.bad{color:var(--warn);font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:12px}
+  .big{font-size:60px;font-weight:700;line-height:1}
+  .unit{font-size:22px;font-weight:500;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid .card{margin:0}
+  .k{font-size:13px;color:var(--muted);margin-bottom:4px}
+  .n{font-size:28px;font-weight:650}
+  .n small{font-size:15px;font-weight:500;color:var(--muted)}
+  label{display:block;font-size:14px;color:var(--muted);margin-bottom:6px}
+  input{width:100%;font-size:17px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);margin-bottom:12px}
+  button{width:100%;font-size:17px;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+  button.secondary{background:transparent;color:var(--muted);border:1px solid var(--line);font-weight:500;font-size:14px;padding:9px;margin-top:14px}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+  #err{color:var(--warn);font-size:14px;min-height:20px;margin:8px 0 0}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Đồng hồ điện</h1>
+
+  <section id="login" class="card">
+    <label for="em">Email</label>
+    <input id="em" type="email" autocomplete="username">
+    <label for="pw">Mật khẩu</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    <button id="btnLogin">Đăng nhập</button>
+    <p id="err" role="alert"></p>
+  </section>
+
+  <section id="app" class="hidden">
+    <p id="age" class="sub">Đang chờ dữ liệu…</p>
+    <div class="card">
+      <div class="k">Công suất</div>
+      <div class="big"><span id="p">--</span> <span class="unit">W</span></div>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="k">Điện áp</div><div class="n"><span id="v">--</span> <small>V</small></div></div>
+      <div class="card"><div class="k">Dòng điện</div><div class="n"><span id="i">--</span> <small>A</small></div></div>
+      <div class="card"><div class="k">Điện năng</div><div class="n"><span id="kwh">--</span> <small>kWh</small></div></div>
+      <div class="card"><div class="k">Tần số</div><div class="n"><span id="hz">--</span> <small>Hz</small></div></div>
+      <div class="card"><div class="k">Hệ số công suất</div><div class="n"><span id="pf">--</span></div></div>
+      <div class="card"><div class="k">Công suất biểu kiến</div><div class="n"><span id="s">--</span> <small>VA</small></div></div>
+      <div class="card"><div class="k">Nhiệt độ</div><div class="n"><span id="t">--</span> <small>°C</small></div></div>
+      <div class="card"><div class="k">Độ ẩm</div><div class="n"><span id="h">--</span> <small>%</small></div></div>
+    </div>
+    <button id="btnLogout" class="secondary">Đăng xuất</button>
+  </section>
+</main>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut }
+    from "https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js";
+  import { getDatabase, ref, onValue }
+    from "https://www.gstatic.com/firebasejs/13.3.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyButGGyb0yXF35yA4bC6Wts05XLRPttw7w",
+    authDomain: "thiet-bi-giam-sat-dien-22c93.firebaseapp.com",
+    databaseURL: "https://thiet-bi-giam-sat-dien-22c93-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "thiet-bi-giam-sat-dien-22c93",
+    storageBucket: "thiet-bi-giam-sat-dien-22c93.firebasestorage.app",
+    messagingSenderId: "1031358541604",
+    appId: "1:1031358541604:web:2dab0958a0fcba97158db1"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getDatabase(app);
+  const $ = id => document.getElementById(id);
+  let unsub = null, lastTs = 0, lastRecv = 0, timer = null;
+
+  const fmt = (x, d) => (x === null || x === undefined) ? "--" : Number(x).toFixed(d);
+
+  function showAge() {
+    const el = $("age");
+    if (!lastRecv) { el.textContent = "Đang chờ dữ liệu…"; el.className = "sub"; return; }
+    // ưu tiên giờ của thiết bị; nếu thiết bị chưa có giờ thì tính từ lúc trang nhận được số mới
+    const age = lastTs ? Math.max(0, Math.round(Date.now() / 1000 - lastTs))
+                       : Math.round((Date.now() - lastRecv) / 1000);
+    if (age > 90) { el.textContent = "Thiết bị mất kết nối, số cuối cách đây " + Math.round(age / 60) + " phút"; el.className = "sub bad"; }
+    else { el.textContent = "Cập nhật " + age + " giây trước"; el.className = "sub"; }
+  }
+
+  $("btnLogin").addEventListener("click", async () => {
+    $("err").textContent = "";
+    try { await signInWithEmailAndPassword(auth, $("em").value.trim(), $("pw").value); }
+    catch (e) { $("err").textContent = "Sai email hoặc mật khẩu, hoặc tên miền này chưa được thêm vào Authorized domains."; }
+  });
+  $("pw").addEventListener("keydown", e => { if (e.key === "Enter") $("btnLogin").click(); });
+  $("btnLogout").addEventListener("click", () => signOut(auth));
+
+  onAuthStateChanged(auth, user => {
+    $("login").classList.toggle("hidden", !!user);
+    $("app").classList.toggle("hidden", !user);
+    if (unsub) { unsub(); unsub = null; }
+    clearInterval(timer);
+    if (!user) return;
+
+    unsub = onValue(ref(db, "dongho"), s => {
+      const d = s.val();
+      if (!d) return;
+      lastTs = d.ts || 0; lastRecv = Date.now();
+      $("p").textContent   = fmt(d.p, 0);
+      $("v").textContent   = fmt(d.v, 1);
+      $("i").textContent   = fmt(d.i, 2);
+      $("kwh").textContent = fmt(d.kwh, 2);
+      $("hz").textContent  = fmt(d.hz, 1);
+      $("pf").textContent  = fmt(d.pf, 2);
+      $("s").textContent   = fmt(d.s, 0);
+      $("t").textContent   = fmt(d.t, 1);
+      $("h").textContent   = fmt(d.h, 0);
+      showAge();
+    });
+    timer = setInterval(showAge, 5000);
+  });
+</script>
+</body>
+</html>
