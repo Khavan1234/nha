@@ -25,6 +25,15 @@
   .big{font-size:68px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
   .unit{font-size:26px;font-weight:700;color:rgba(36,22,0,.7)}
 
+  /* Biểu đồ công suất */
+  .chart-box{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:10px 6px 12px;margin-bottom:12px}
+  #chart{width:100%;height:230px;display:block;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+  #chInfo{text-align:center;color:var(--muted);font-size:12.5px;white-space:pre-line;min-height:3.2em;padding:2px 6px 0;line-height:1.4}
+  .chips{display:flex;gap:6px;padding:0 6px;margin:8px 0 2px}
+  .chips button{flex:1;padding:7px 4px;font-size:12.5px;font-weight:600;background:#0d1c30;color:var(--muted);border:1px solid var(--line);border-radius:8px;cursor:pointer}
+  .chips button.on{background:#2e6fb7;color:#fff;border-color:#4da3ff}
+  #chLiveBtn{display:none;margin:8px 6px 0;width:calc(100% - 12px);padding:9px;font-size:14px;background:#d97706;color:#fff}
+
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .card{--c:#7aa7ff;border-radius:14px;padding:14px 14px 14px 16px;border:1px solid var(--line);
     border-left:5px solid var(--c);background:var(--panel);
@@ -64,6 +73,21 @@
       <div class="k">Công suất</div>
       <div class="big"><span id="p">--</span> <span class="unit">W</span></div>
     </div>
+
+    <!-- Biểu đồ công suất giống trên Web Server -->
+    <div class="chart-box">
+      <canvas id="chart"></canvas>
+      <div id="chInfo"></div>
+      <div class="chips" id="chWin">
+        <button class="on" type="button" data-w="15">15 giây</button>
+        <button type="button" data-w="60">1 phút</button>
+        <button type="button" data-w="300">5 phút</button>
+        <button type="button" data-w="900">15 phút</button>
+        <button type="button" data-w="3600">1 giờ</button>
+      </div>
+      <button id="chLiveBtn" type="button">Về hiện tại</button>
+    </div>
+
     <div class="grid">
       <div class="card" style="--c:#ffb347"><div class="k">Điện áp</div><div class="n"><span id="v">--</span> <small>V</small></div></div>
       <div class="card" style="--c:#2fd6ee"><div class="k">Dòng điện</div><div class="n"><span id="i">--</span> <small>A</small></div></div>
@@ -99,20 +123,330 @@
   const auth = getAuth(app);
   const db = getDatabase(app);
   const $ = id => document.getElementById(id);
-  let unsub = null, lastTs = 0, lastRecv = 0, timer = null;
+  let unsub = null, lastTs = 0, lastRecv = 0, timer = null, chTickTimer = null;
+
+  // Lưu trạng thái dữ liệu mới nhất từ Firebase
+  let latestPower = null, latestOk = false, latestTs = 0;
 
   const fmt = (x, d) => (x === null || x === undefined) ? "--" : Number(x).toFixed(d);
 
   function showAge() {
     const el = $("age");
     if (!lastRecv) { el.textContent = "Đang chờ dữ liệu…"; el.className = "sub"; return; }
-    // ưu tiên giờ của thiết bị; nếu thiết bị chưa có giờ thì tính từ lúc trang nhận được số mới
     const age = lastTs ? Math.max(0, Math.round(Date.now() / 1000 - lastTs))
                        : Math.round((Date.now() - lastRecv) / 1000);
     if (age > 90) { el.textContent = "Thiết bị mất kết nối, số cuối cách đây " + Math.round(age / 60) + " phút"; el.className = "sub bad"; }
     else { el.textContent = "Cập nhật " + age + " giây trước"; el.className = "sub live"; }
   }
 
+  // ===================== BIỂU ĐỒ CÔNG SUẤT (GIỐNG TRÊN WEB SERVER) =====================
+  const CH_N = 15;
+  const CH_MAX = 3600;
+  let chData = [];
+  let chBase = 0;
+  let chHs = 0;
+  let chWin = CH_N;
+  let chLive = true, chViewEnd = 0;
+  let chNowT = 0;
+  let chDrag = null;
+
+  function chFmt(s) {
+    s = Math.max(0, Math.round(s));
+    return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
+  }
+  function chMinEnd() { return Math.min(chHs, chBase + chWin); }
+  function chEnd() { return chLive ? chHs : Math.min(chHs, Math.max(chViewEnd, chMinEnd())); }
+
+  function chPushSecond() {
+    if (latestPower === null) return;
+    const age = lastTs ? Math.max(0, Math.round(Date.now() / 1000 - lastTs))
+                       : Math.round((Date.now() - lastRecv) / 1000);
+    // Nếu thiết bị mất kết nối (> 90s) hoặc mất PZEM (ok = false) thì ghi 0 W giống web server
+    const isOnline = (age <= 90) && latestOk;
+    const w = isOnline && isFinite(latestPower) ? Math.max(0, Math.round(latestPower)) : 0;
+
+    chNowT = Math.floor(Date.now() / 1000);
+    chData.push(w);
+    chHs++;
+    if (chData.length > CH_MAX) {
+      chData.shift();
+      chBase++;
+    }
+    chDraw();
+  }
+
+  function chNice(mx) {
+    const raw = Math.max(mx * 1.15, 1) / 4;
+    const pw = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / pw;
+    const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * pw;
+    return { step: step, top: Math.ceil(Math.max(mx * 1.1, 1) / step) * step };
+  }
+
+  function chTickStep(win) {
+    if (win <= 15) return 2;
+    const a = [5, 10, 15, 30, 60, 120, 300, 600, 900];
+    for (let i = 0; i < a.length; i++) if (a[i] >= win / 6) return a[i];
+    return 900;
+  }
+
+  function chDraw() {
+    const cv = $("chart");
+    if (!cv || !cv.clientWidth) return;
+    const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = 230;
+    if (cv.width !== Math.round(W * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    const c = cv.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, W, H);
+
+    const L = 40, R = 10, T = 38, B = 46, pw = W - L - R, ph = H - T - B;
+    const win = chWin, end = chEnd(), off = chHs - end, live = chLive || off <= 0;
+    const slot = q => q - (end - win);
+    const X = s => L + (s + 0.5) * pw / win;
+    const j0 = Math.max(0, Math.floor(end - win - 1 - chBase));
+    const j1 = Math.min(chData.length - 1, Math.ceil(end - chBase));
+
+    let mx = 0;
+    for (let j = j0; j <= j1; j++) {
+      const v = chData[j];
+      if (v == null) continue;
+      const s = slot(chBase + j);
+      if (s >= -0.5 && s <= win - 0.5 && v > mx) mx = v;
+    }
+
+    const sc = chNice(mx), Y = v => T + ph - v / sc.top * ph;
+    c.font = "11px system-ui,sans-serif";
+    c.strokeStyle = "#223653";
+    c.lineWidth = 1;
+    c.fillStyle = "#8fa3bd";
+    c.textAlign = "right";
+    c.textBaseline = "middle";
+
+    for (let v = 0; v <= sc.top + sc.step / 2; v += sc.step) {
+      const y = Math.round(Y(v)) + 0.5;
+      c.beginPath();
+      c.moveTo(L, y);
+      c.lineTo(W - R, y);
+      c.stroke();
+      c.fillText(v >= 1000 ? (v / 1000) + "k" : String(v), L - 6, y);
+    }
+
+    c.textAlign = "center";
+    c.textBaseline = "top";
+    const ts = chTickStep(win);
+    for (let a = Math.max(0, Math.ceil(off - 0.5)); a <= Math.floor(win - 0.5 + off); a++) {
+      if (a % ts !== 0) continue;
+      c.fillText(a === 0 ? "0" : "-" + (win >= 60 ? chFmt(a) : a), X(win - 1 - a + off), T + ph + 8);
+    }
+
+    c.textAlign = "left";
+    c.textBaseline = "alphabetic";
+    c.font = "11px system-ui,sans-serif";
+    c.fillText("CÔNG SUẤT (W)", 4, 14);
+    c.textAlign = "right";
+    c.fillText(win >= 60 ? "THỜI GIAN (phút:giây trước)" : "THỜI GIAN (giây trước)", W - 4, H - 6);
+
+    const mode = live ? "TRỰC TIẾP" : "LỊCH SỬ", tw = c.measureText(mode).width;
+    c.fillStyle = live ? "#35e0a1" : "#ff9f1c";
+    c.fillText(mode, W - 4, 14);
+    c.beginPath();
+    c.arc(W - 4 - tw - 8, 10, 4, 0, 6.2832);
+    c.fill();
+
+    const GB = win > 60 ? Math.max(2, Math.round(win / 90)) : 1;
+    if (chData.length) {
+      c.save();
+      c.beginPath();
+      c.rect(L, 0, W - L, H);
+      c.clip();
+      const cand = [], K = Math.max(1, Math.round(win / 15)), mG = Math.max(1, Math.round(K / GB));
+
+      if (GB > 1) {
+        const pts = [];
+        let bi = null, lastB = null, sum = 0, cnt = 0, lo = 0, hi = 0, sq = 0;
+        const flush = () => {
+          if (bi === null || !cnt) return;
+          if (lastB !== null && bi - lastB > 1) pts.push(null);
+          pts.push({ x: X(slot(sq / cnt)), a: sum / cnt, lo: lo, hi: hi, b: bi });
+          lastB = bi;
+        };
+        for (let j = j0; j <= j1; j++) {
+          const v = chData[j];
+          if (v == null) continue;
+          const q = chBase + j, b = Math.floor(q / GB);
+          if (b !== bi) { flush(); bi = b; sum = 0; cnt = 0; sq = 0; lo = v; hi = v; }
+          sum += v; cnt++; sq += q; if (v < lo) lo = v; if (v > hi) hi = v;
+        }
+        flush();
+
+        const segs = [];
+        let cur = [];
+        pts.forEach(p => { if (p) cur.push(p); else { if (cur.length) segs.push(cur); cur = []; } });
+        if (cur.length) segs.push(cur);
+
+        segs.forEach(sg => {
+          if (sg.length < 2) {
+            c.fillStyle = "#4da3ff";
+            c.beginPath();
+            c.arc(sg[0].x, Y(sg[0].a), 2, 0, 6.2832);
+            c.fill();
+            return;
+          }
+          c.fillStyle = "rgba(77,163,255,0.22)";
+          c.beginPath();
+          sg.forEach((p, i) => { if (i) c.lineTo(p.x, Y(p.hi)); else c.moveTo(p.x, Y(p.hi)); });
+          for (let i = sg.length - 1; i >= 0; i--) c.lineTo(sg[i].x, Y(sg[i].lo));
+          c.closePath();
+          c.fill();
+
+          c.strokeStyle = "#4da3ff";
+          c.lineWidth = 2;
+          c.lineJoin = "round";
+          c.beginPath();
+          sg.forEach((p, i) => { if (i) c.lineTo(p.x, Y(p.a)); else c.moveTo(p.x, Y(p.a)); });
+          c.stroke();
+        });
+
+        pts.forEach((p, i) => {
+          if (!p) return;
+          const nw = (i === pts.length - 1);
+          if (p.b % mG === 0 || (live && nw)) cand.push({ x: p.x, y: Y(p.a), v: p.a, f: live && nw });
+        });
+      } else {
+        c.strokeStyle = "#4da3ff";
+        c.lineWidth = 2;
+        c.lineJoin = "round";
+        c.beginPath();
+        let pen = false;
+        for (let j = j0; j <= j1; j++) {
+          const v = chData[j];
+          if (v == null) { pen = false; continue; }
+          const x = X(slot(chBase + j)), y = Y(v);
+          if (pen) c.lineTo(x, y); else { c.moveTo(x, y); pen = true; }
+        }
+        c.stroke();
+
+        if (win <= 30) {
+          c.fillStyle = "#4da3ff";
+          for (let j = j0; j <= j1; j++) {
+            const v = chData[j];
+            if (v == null) continue;
+            c.beginPath();
+            c.arc(X(slot(chBase + j)), Y(v), 2.5, 0, 6.2832);
+            c.fill();
+          }
+        }
+
+        for (let j = j0; j <= j1; j++) {
+          const v = chData[j];
+          if (v == null) continue;
+          const q = chBase + j, s = slot(q);
+          if (s < -0.5 || s > win - 0.5) continue;
+          const nw = (q === chHs - 1);
+          if (q % K === 0 || (live && nw)) cand.push({ x: X(s), y: Y(v), v: v, f: live && nw });
+        }
+      }
+
+      // Nhãn số trên từng điểm
+      c.font = "10px system-ui,sans-serif";
+      c.textAlign = "center";
+      c.textBaseline = "bottom";
+      const kept = [];
+      cand.forEach(p => {
+        if (p.x < L + 8 || p.x > W - 4) return;
+        p.w = c.measureText(String(Math.round(p.v))).width + 6;
+        const lk = kept[kept.length - 1];
+        if (lk && p.x - lk.x < (lk.w + p.w) / 2) { if (p.f) kept.pop(); else return; }
+        kept.push(p);
+      });
+      kept.forEach(p => {
+        c.fillStyle = "#4da3ff";
+        c.beginPath();
+        c.arc(p.x, p.y, 2.5, 0, 6.2832);
+        c.fill();
+        c.fillStyle = "#eef3fa";
+        c.fillText(String(Math.round(p.v)), p.x, p.y - 6);
+      });
+      c.restore();
+    }
+
+    let t = "";
+    if (!chData.length) {
+      t = "Đang tích lũy dữ liệu biểu đồ…";
+    } else {
+      if (chNowT > 0) {
+        const f = tt => {
+          const q = new Date(Math.round(tt + 25200) * 1000), p = x => ("0" + x).slice(-2);
+          return p(q.getUTCHours()) + ":" + p(q.getUTCMinutes()) + ":" + p(q.getUTCSeconds());
+        };
+        t = f(chNowT - off - win) + " – " + f(chNowT - off) + " · ";
+      }
+      t += (live ? "trực tiếp" : "cách đây " + chFmt(off)) + "\nĐã lưu trên trang: " + chFmt(chData.length) + " / 60:00 phút (đồng bộ mỗi 15s)";
+      if (GB > 1) t += "\nMỗi điểm = trung bình " + GB + " giây · vùng mờ = thấp nhất – cao nhất";
+    }
+    $("chInfo").textContent = t;
+    $("chLiveBtn").style.display = live ? "none" : "block";
+  }
+
+  function chSetWin(s) {
+    chWin = s;
+    const btns = $("chWin").children;
+    for (let i = 0; i < btns.length; i++) {
+      btns[i].className = Number(btns[i].dataset.w) === s ? "on" : "";
+    }
+    chDraw();
+  }
+  function chGoLive() { chLive = true; chDraw(); }
+  function chMove(ds) {
+    const e = Math.min(chHs, Math.max(chMinEnd(), chEnd() + ds));
+    chViewEnd = e;
+    chLive = chHs - e < 0.5;
+    chDraw();
+  }
+
+  // Sự kiện nút chọn khung thời gian & kéo vuốt trên biểu đồ
+  $("chWin").addEventListener("click", e => {
+    const btn = e.target.closest("button[data-w]");
+    if (btn) chSetWin(Number(btn.dataset.w));
+  });
+  $("chLiveBtn").addEventListener("click", chGoLive);
+
+  const cv = $("chart");
+  cv.addEventListener("pointerdown", e => {
+    chDrag = { x: e.clientX, end: chEnd() };
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!chDrag) return;
+    const pw = cv.clientWidth - 50;
+    if (pw <= 0) return;
+    chViewEnd = Math.min(chHs, Math.max(chMinEnd(), chDrag.end - (e.clientX - chDrag.x) * chWin / pw));
+    chLive = false;
+    chDraw();
+  });
+  const up = () => {
+    if (!chDrag) return;
+    chDrag = null;
+    if (chHs - chEnd() < 0.5) chLive = true;
+    chDraw();
+  };
+  cv.addEventListener("pointerup", up);
+  cv.addEventListener("pointercancel", up);
+
+  document.addEventListener("keydown", e => {
+    const tg = (e.target && e.target.tagName) || "";
+    if (tg === "INPUT" || tg === "TEXTAREA" || tg === "SELECT" || e.ctrlKey || e.altKey || e.metaKey) return;
+    const st = Math.max(1, Math.round(chWin / 5));
+    if (e.key === "ArrowLeft") { chMove(-st); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { chMove(st); e.preventDefault(); }
+    else if (e.key === "End") { chGoLive(); e.preventDefault(); }
+  });
+  window.addEventListener("resize", chDraw);
+
+  // ===================== ĐĂNG NHẬP & FIREBASE =====================
   $("btnLogin").addEventListener("click", async () => {
     $("err").textContent = "";
     try { await signInWithEmailAndPassword(auth, $("em").value.trim(), $("pw").value); }
@@ -126,12 +460,23 @@
     $("app").classList.toggle("hidden", !user);
     if (unsub) { unsub(); unsub = null; }
     clearInterval(timer);
+    clearInterval(chTickTimer);
     if (!user) return;
+
+    // Đặt lại dữ liệu biểu đồ khi mới đăng nhập
+    chData = []; chBase = 0; chHs = 0; chLive = true;
+    latestPower = null; latestOk = false;
+    requestAnimationFrame(chDraw);
 
     unsub = onValue(ref(db, "dongho"), s => {
       const d = s.val();
       if (!d) return;
-      lastTs = d.ts || 0; lastRecv = Date.now();
+      const isFirst = (latestPower === null);
+      lastTs = d.ts || 0;
+      lastRecv = Date.now();
+      latestPower = Number(d.p || 0);
+      latestOk = (d.ok !== false);
+
       $("p").textContent   = fmt(d.p, 0);
       $("v").textContent   = fmt(d.v, 1);
       $("i").textContent   = fmt(d.i, 2);
@@ -142,8 +487,12 @@
       $("t").textContent   = fmt(d.t, 1);
       $("h").textContent   = fmt(d.h, 0);
       showAge();
+
+      if (isFirst) chPushSecond(); // Vẽ điểm đầu tiên ngay lập tức khi nhận dữ liệu
     });
+
     timer = setInterval(showAge, 5000);
+    chTickTimer = setInterval(chPushSecond, 1000); // Chạy trục thời gian từng giây giống web server
   });
 </script>
 </body>
